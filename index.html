@@ -33,7 +33,14 @@ button, a.btn { display:block; width:100%; min-height:52px; padding:12px; border
 button.second, a.second { background:transparent; color:var(--accent); border:2px solid var(--accent); }
 button.small { width:auto; min-height:40px; padding:6px 12px; margin:0; font-size:14px; }
 button:disabled { opacity:.45; }
-input { width:100%; min-height:48px; font:inherit; padding:8px 12px; border:1px solid var(--line); border-radius:10px; background:var(--bg); color:var(--text); }
+input, textarea { display:block; width:100%; min-height:48px; font:inherit; padding:8px 12px; border:1px solid var(--line); border-radius:10px; background:var(--bg); color:var(--text); }
+textarea { resize:vertical; }
+textarea:disabled { opacity:.65; }
+label { display:block; font-weight:700; margin:14px 0 6px; }
+.count { margin:4px 0 0; text-align:right; }
+ul.error { margin:12px 0 0; padding-left:20px; }
+ul.error:empty { display:none; }
+.tag.edit { color:var(--warn); margin:0 0 8px; }
 img.preview { display:block; width:100%; max-height:300px; object-fit:contain; background:var(--bg); border-radius:10px; }
 ol { padding-left:22px; margin:8px 0; }
 li { margin:6px 0; }

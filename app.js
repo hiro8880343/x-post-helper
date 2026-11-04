@@ -38,13 +38,15 @@ const state = {
   bundle: null,     // { created, sets: [...] }
   done: {},         // id -> 完了日時 (受信し直しても残る = 二重投稿防止)
   step: {},         // id -> 1 | 2 | 3
+  edits: {},        // id -> スマホで直した内容 (PC の元データとの差分)
+  editingId: null,  // 編集画面を開いているセットの id
   etag: "",
   justConnected: false,
   syncing: false,
 };
 
 async function loadState() {
-  for (const name of ["key", "handle", "bundle", "done", "step", "etag"]) {
+  for (const name of ["key", "handle", "bundle", "done", "step", "edits", "etag"]) {
     const value = await kvGet(name);
     if (value !== undefined) state[name] = value;
   }
@@ -86,6 +88,95 @@ function imageUrl(set) {
   }
   return blobCache.get(set.id);
 }
+function releaseImage(id) {
+  if (blobCache.has(id)) URL.revokeObjectURL(blobCache.get(id));
+  blobCache.delete(id);
+}
+
+/* ---------- 編集と点検 (PC の phone_send.py と同じ基準) ---------- */
+const MAX_WEIGHT = 280;
+const URL_WEIGHT = 23;
+const URL_PATTERN = /(https?:\/\/|www\.)\S*/gi;
+const IMAGE_MIMES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+
+function textWeight(text) {
+  let total = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    const narrow = cp <= 0x10ff || (cp >= 0x2000 && cp <= 0x200d)
+      || (cp >= 0x2010 && cp <= 0x201f) || (cp >= 0x2032 && cp <= 0x2037);
+    total += narrow ? 1 : 2;
+  }
+  return total;
+}
+function xLength(text) {
+  let total = 0;
+  let last = 0;
+  for (const match of text.matchAll(URL_PATTERN)) {
+    total += textWeight(text.slice(last, match.index)) + URL_WEIGHT;
+    last = match.index + match[0].length;
+  }
+  return total + textWeight(text.slice(last));
+}
+function hasUrl(text) {
+  return /(https?:\/\/|www\.)\S*/i.test(text);
+}
+function zenkaku(weight) {
+  return Math.ceil(weight / 2);
+}
+function effective(raw) {
+  return { ...raw, ...(state.edits[raw.id] || {}) };
+}
+function validateEdit(draft, raw) {
+  const errors = [];
+  const { main, reply, link, image } = draft;
+  if (!main) errors.push("本文が空です");
+  if (hasUrl(main)) errors.push("本文にリンクが入っています (本文は文章だけにします)");
+  if (!reply) errors.push("リプライの文章が空です");
+  if (hasUrl(reply)) errors.push("リプライの文章にリンクが入っています (リンクは「リンク」の欄に書きます)");
+  if (main && main.replace(/\s+/g, "") === reply.replace(/\s+/g, "")) {
+    errors.push("本文とリプライの文章が同じです (リプライの文章を変えてください)");
+  }
+  const others = state.bundle.sets.filter((s) => s.id !== raw.id).map((s) => effective(s).main);
+  if (main && others.includes(main)) errors.push("ほかのセットと本文が同じです");
+  let validLink = false;
+  try {
+    const parsed = new URL(link);
+    validLink = ["http:", "https:"].includes(parsed.protocol) && Boolean(parsed.host) && !/\s/.test(link);
+  } catch { /* 下でエラーにする */ }
+  if (!link) errors.push("リンクが空です");
+  else if (!validLink) errors.push("リンクの形が正しくありません");
+  if (xLength(main) > MAX_WEIGHT) errors.push(`本文が長すぎます (全角 ${zenkaku(xLength(main))} 文字相当、上限 140)`);
+  const combined = `${reply}\n${link}`;
+  if (xLength(combined) > MAX_WEIGHT) errors.push(`リプライが長すぎます (リンク込みで全角 ${zenkaku(xLength(combined))} 文字相当、上限 140)`);
+  if (!IMAGE_MIMES.includes(image.mime)) {
+    errors.push("使えない画像形式です (jpg / png / webp / gif)");
+  } else {
+    const bytes = Math.floor(image.data.length * 3 / 4);
+    const limit = image.mime === "image/gif" ? 15 : 5;
+    if (bytes > limit * 1024 * 1024) errors.push(`画像が大きすぎます (上限 ${limit}MB)`);
+  }
+  return errors;
+}
+async function saveEdit(raw, draft) {
+  const edit = {};
+  for (const field of ["main", "reply", "link"]) {
+    if (draft[field] !== raw[field]) edit[field] = draft[field];
+  }
+  if (draft.image.data !== raw.image.data) edit.image = draft.image;
+  if (Object.keys(edit).length) state.edits[raw.id] = edit;
+  else delete state.edits[raw.id];
+  releaseImage(raw.id);
+  await kvSet("edits", state.edits);
+}
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
 
 /* ---------- 受信 ---------- */
 async function decrypt(buffer) {
@@ -124,6 +215,13 @@ async function sync(manual) {
       changed = isNew;
       state.bundle = bundle;
       state.etag = res.headers.get("ETag") || "";
+      // 新しいデータに無くなったセットの編集と途中経過を片付ける (「済」は二重投稿防止のため残す)
+      const ids = new Set(bundle.sets.map((s) => s.id));
+      for (const id of Object.keys(state.edits)) if (!ids.has(id)) delete state.edits[id];
+      for (const id of Object.keys(state.step)) if (!ids.has(id)) delete state.step[id];
+      blobCache.forEach((_, id) => releaseImage(id));
+      await kvSet("edits", state.edits);
+      await kvSet("step", state.step);
       await kvSet("bundle", bundle);
       await kvSet("etag", state.etag);
       if (isNew) toast(`${bundle.sets.length} セットを受け取りました`);
@@ -135,7 +233,8 @@ async function sync(manual) {
   } finally {
     state.syncing = false;
     renderSyncButton();
-    if (state.handle && (changed || !state.bundle || state.syncError !== errorBefore)) render();
+    // 編集中は入力を消さないよう描き直さない (閉じたときに反映される)
+    if (state.handle && !state.editingId && (changed || !state.bundle || state.syncError !== errorBefore)) render();
   }
 }
 
@@ -201,19 +300,22 @@ function viewStep1(set, number, total) {
   return el("section", { class: "card" },
     stepBar(1),
     el("h2", {}, `セット ${number} / ${total}：本ポスト`),
+    editedTag(set),
     el("div", { class: "quote" }, set.main),
     el("a", { class: "btn", href: url, target: "_blank", rel: "noopener", id: "open-main" }, "X で本ポストを開く"),
     el("p", { class: "sub" }, "X が開いたら文章を確認して「ポスト」を押し、このアプリに戻ってください。"),
     el("button", {
       class: "second", id: "main-posted",
       onclick: () => setStep(set, 2),
-    }, "ポストした → 次へ"));
+    }, "ポストした → 次へ"),
+    editButton(set));
 }
 
 function viewStep2(set, number, total) {
   return el("section", { class: "card" },
     stepBar(2),
     el("h2", {}, `セット ${number} / ${total}：リプライの準備`),
+    editedTag(set),
     el("img", { class: "preview", src: imageUrl(set), alt: "リプライに付ける画像" }),
     el("div", { class: "quote" }, `${set.reply}\n${set.link}`),
     el("button", {
@@ -230,6 +332,7 @@ function viewStep2(set, number, total) {
         await setStep(set, 3);
       },
     }, "画像を保存して、文章をコピー"),
+    editButton(set),
     el("button", { class: "second", onclick: () => setStep(set, 1) }, "← 本ポストに戻る"));
 }
 
@@ -253,10 +356,102 @@ function viewStep3(set, number, total) {
     el("button", { class: "second", onclick: () => setStep(set, 2) }, "← 準備に戻る"));
 }
 
+function editedTag(set) {
+  return state.edits[set.id] ? el("p", { class: "tag edit" }, "スマホで編集済み") : null;
+}
+function editButton(set) {
+  return el("button", {
+    class: "second", id: "edit",
+    onclick: () => {
+      state.editingId = set.id;
+      render();
+      scrollTo(0, 0);
+    },
+  }, "内容を編集する");
+}
+
+function viewEditor(raw, number, total) {
+  const current = effective(raw);
+  const mainLocked = (state.step[raw.id] || 1) >= 2;
+  const draftImage = { value: current.image };
+  const close = () => {
+    state.editingId = null;
+    render();
+    scrollTo(0, 0);
+  };
+  const field = (tag, id, value, props = {}) => el(tag, { id, value, spellcheck: false, ...props });
+  const mainInput = field("textarea", "edit-main", current.main, { rows: 3, disabled: mainLocked });
+  const replyInput = field("textarea", "edit-reply", current.reply, { rows: 3 });
+  const linkInput = field("input", "edit-link", current.link, { type: "url", autocapitalize: "off", autocomplete: "off" });
+  const mainCount = el("p", { class: "sub count" });
+  const replyCount = el("p", { class: "sub count" });
+  const errorList = el("ul", { class: "error", id: "edit-errors" });
+  const preview = el("img", { class: "preview", id: "edit-preview", src: imageUrl(current), alt: "リプライに付ける画像" });
+  const fileInput = el("input", { type: "file", accept: "image/jpeg,image/png,image/webp,image/gif", hidden: true, id: "edit-file" });
+  let previewUrl = null;
+
+  const updateCounts = () => {
+    mainCount.textContent = `全角 ${zenkaku(xLength(mainInput.value.trim()))} / 140 文字相当`;
+    replyCount.textContent = `リンク込みで全角 ${zenkaku(xLength(`${replyInput.value.trim()}\n${linkInput.value.trim()}`))} / 140 文字相当`;
+  };
+  [mainInput, replyInput, linkInput].forEach((input) => input.addEventListener("input", updateCounts));
+  updateCounts();
+
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    draftImage.value = { name: file.name, mime: file.type, data: await readFileAsBase64(file) };
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = URL.createObjectURL(file);
+    preview.src = previewUrl;
+  });
+
+  const save = async () => {
+    const draft = {
+      main: mainLocked ? current.main : mainInput.value.trim(),
+      reply: replyInput.value.trim(),
+      link: linkInput.value.trim(),
+      image: draftImage.value,
+    };
+    const errors = validateEdit(draft, raw);
+    errorList.replaceChildren(...errors.map((message) => el("li", {}, message)));
+    if (errors.length) {
+      errorList.scrollIntoView({ block: "center" });
+      return;
+    }
+    await saveEdit(raw, draft);
+    toast("編集を保存しました");
+    close();
+  };
+
+  return el("section", { class: "card" },
+    el("h2", {}, `セット ${number} / ${total}：編集`),
+    el("label", { htmlFor: "edit-main" }, "本文"), mainInput, mainCount,
+    mainLocked ? el("p", { class: "sub" }, "本ポストは投稿済みなので、本文は変更できません。") : null,
+    el("label", { htmlFor: "edit-reply" }, "リプライの文章"), replyInput,
+    el("label", { htmlFor: "edit-link" }, "リンク"), linkInput, replyCount,
+    el("label", {}, "リプライの画像"), preview, fileInput,
+    el("button", { class: "second", id: "edit-pick", onclick: () => fileInput.click() }, "写真から選び直す"),
+    errorList,
+    el("button", { id: "edit-save", onclick: save }, "点検して保存"),
+    el("button", { class: "second", id: "edit-cancel", onclick: close }, "保存せずに戻る"),
+    state.edits[raw.id] ? el("button", {
+      class: "second", id: "edit-reset",
+      onclick: async () => {
+        const original = { ...raw, main: mainLocked ? current.main : raw.main };
+        if (!confirm("スマホでの編集をやめて、PC から届いた内容に戻しますか？")) return;
+        await saveEdit(raw, original);
+        toast("PC から届いた内容に戻しました");
+        close();
+      },
+    }, mainLocked ? "リプライを PC の内容に戻す" : "PC の内容に戻す") : null);
+}
+
 function viewList(sets) {
   return el("section", { class: "card" },
     el("h2", {}, "セットの一覧"),
-    ...sets.map((set, i) => {
+    ...sets.map((raw, i) => {
+      const set = effective(raw);
       const done = Boolean(state.done[set.id]);
       return el("div", { class: "row" },
         el("span", { class: "t" }, `${i + 1}. ${set.main}`),
@@ -323,13 +518,20 @@ function render() {
     return;
   }
 
+  const editingIndex = sets.findIndex((s) => s.id === state.editingId);
+  if (editingIndex !== -1) {
+    view.append(viewEditor(sets[editingIndex], editingIndex + 1, sets.length));
+    return;
+  }
+  state.editingId = null;
+
   const index = sets.findIndex((s) => !state.done[s.id]);
   if (index === -1) {
     view.append(el("section", { class: "card" },
       el("h2", {}, "全部終わりました 🎉"),
       el("p", { class: "sub" }, "次の投稿は、PC で用意して「スマホへ送る」を押すと届きます。")));
   } else {
-    const set = sets[index];
+    const set = effective(sets[index]);
     const step = state.step[set.id] || 1;
     const screens = { 1: viewStep1, 2: viewStep2, 3: viewStep3 };
     view.append(screens[step](set, index + 1, sets.length));
