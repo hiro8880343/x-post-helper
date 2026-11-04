@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>X投稿ヘルパー</title>
+<meta name="robots" content="noindex">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#0f766e">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<style>
+:root {
+  --bg:#f4f6f6; --card:#fff; --text:#17201f; --sub:#5c6b69; --line:#d9e0df;
+  --accent:#0f766e; --accent-text:#fff; --done:#15803d; --warn-bg:#fff4e0; --warn:#8a5300; --err:#b42318;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#101615; --card:#1a2221; --text:#edf2f1; --sub:#a0aeac; --line:#303c3a;
+    --accent:#2dd4bf; --accent-text:#06211e; --done:#4ade80; --warn-bg:#3a2a0d; --warn:#fbd38d; --err:#fda29b; }
+}
+* { box-sizing:border-box; }
+[hidden] { display:none !important; }
+body { margin:0; background:var(--bg); color:var(--text); font:16px/1.6 system-ui,"Noto Sans JP",sans-serif; }
+main { max-width:560px; margin:auto; padding:12px 16px 40px; }
+header { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+h1 { font-size:18px; margin:8px 0; }
+h2 { font-size:17px; margin:0 0 8px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-top:12px; }
+.sub { color:var(--sub); font-size:14px; }
+.quote { white-space:pre-wrap; overflow-wrap:anywhere; border-left:4px solid var(--accent); padding:4px 0 4px 12px; margin:8px 0 12px; }
+button, a.btn { display:block; width:100%; min-height:52px; padding:12px; border:0; border-radius:12px; font:inherit; font-weight:700;
+  text-align:center; text-decoration:none; background:var(--accent); color:var(--accent-text); cursor:pointer; margin-top:10px; }
+button.second, a.second { background:transparent; color:var(--accent); border:2px solid var(--accent); }
+button.small { width:auto; min-height:40px; padding:6px 12px; margin:0; font-size:14px; }
+button:disabled { opacity:.45; }
+input { width:100%; min-height:48px; font:inherit; padding:8px 12px; border:1px solid var(--line); border-radius:10px; background:var(--bg); color:var(--text); }
+img.preview { display:block; width:100%; max-height:300px; object-fit:contain; background:var(--bg); border-radius:10px; }
+ol { padding-left:22px; margin:8px 0; }
+li { margin:6px 0; }
+.steps { display:flex; gap:6px; margin-bottom:12px; }
+.steps span { flex:1; text-align:center; font-size:13px; padding:4px 2px; border-radius:8px; background:var(--bg); color:var(--sub); }
+.steps span.on { background:var(--accent); color:var(--accent-text); font-weight:700; }
+.steps span.ok { color:var(--done); font-weight:700; }
+.notice { background:var(--warn-bg); color:var(--warn); border-radius:10px; padding:10px 12px; margin-top:10px; font-size:14px; }
+.error { color:var(--err); }
+.row { display:flex; align-items:center; gap:10px; padding:10px 0; border-top:1px solid var(--line); }
+.row:first-of-type { border-top:0; }
+.row .t { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tag { font-size:13px; font-weight:700; white-space:nowrap; }
+.tag.ok { color:var(--done); }
+#toast { position:fixed; left:16px; right:16px; bottom:20px; max-width:528px; margin:auto; background:var(--text); color:var(--bg); padding:12px 16px; border-radius:12px; text-align:center; opacity:0; pointer-events:none; transition:opacity .2s; }
+#toast.show { opacity:1; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>X投稿ヘルパー</h1>
+    <button id="sync" class="small second" hidden>受信</button>
+  </header>
+  <div id="status" class="sub"></div>
+  <div id="view"></div>
+</main>
+<div id="toast" role="status"></div>
+<script src="app.js"></script>
+</body>
+</html>
