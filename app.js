@@ -118,6 +118,14 @@ function xLength(text) {
   }
   return total + textWeight(text.slice(last));
 }
+// 広告表示のため、リプライの先頭に【PR】を付ける (すでに PR 表記があれば付けない)。
+// PC の phone_send.py の reply_text と同じ規則。
+const PR_LABEL = "【PR】";
+const PR_PATTERN = /(?<![A-Za-z])(PR|ＰＲ)(?![A-Za-z])/;
+function replyText(reply, link) {
+  const body = PR_PATTERN.test(reply) ? reply : PR_LABEL + reply;
+  return `${body}\n${link}`;
+}
 function hasUrl(text) {
   return /(https?:\/\/|www\.)\S*/i.test(text);
 }
@@ -147,8 +155,8 @@ function validateEdit(draft, raw) {
   if (!link) errors.push("リンクが空です");
   else if (!validLink) errors.push("リンクの形が正しくありません");
   if (xLength(main) > MAX_WEIGHT) errors.push(`本文が長すぎます (全角 ${zenkaku(xLength(main))} 文字相当、上限 140)`);
-  const combined = `${reply}\n${link}`;
-  if (xLength(combined) > MAX_WEIGHT) errors.push(`リプライが長すぎます (リンク込みで全角 ${zenkaku(xLength(combined))} 文字相当、上限 140)`);
+  const combined = replyText(reply, link);
+  if (xLength(combined) > MAX_WEIGHT) errors.push(`リプライが長すぎます (【PR】とリンク込みで全角 ${zenkaku(xLength(combined))} 文字相当、上限 140)`);
   if (!IMAGE_MIMES.includes(image.mime)) {
     errors.push("使えない画像形式です (jpg / png / webp / gif)");
   } else {
@@ -268,7 +276,7 @@ async function undoDone(set) {
   render();
 }
 async function copyReply(set) {
-  const text = `${set.reply}\n${set.link}`;
+  const text = replyText(set.reply, set.link);
   try {
     await navigator.clipboard.writeText(text);
     return true;
@@ -317,7 +325,7 @@ function viewStep2(set, number, total) {
     el("h2", {}, `セット ${number} / ${total}：リプライの準備`),
     editedTag(set),
     el("img", { class: "preview", src: imageUrl(set), alt: "リプライに付ける画像" }),
-    el("div", { class: "quote" }, `${set.reply}\n${set.link}`),
+    el("div", { class: "quote" }, replyText(set.reply, set.link)),
     el("button", {
       id: "prepare",
       onclick: async () => {
@@ -392,7 +400,7 @@ function viewEditor(raw, number, total) {
 
   const updateCounts = () => {
     mainCount.textContent = `全角 ${zenkaku(xLength(mainInput.value.trim()))} / 140 文字相当`;
-    replyCount.textContent = `リンク込みで全角 ${zenkaku(xLength(`${replyInput.value.trim()}\n${linkInput.value.trim()}`))} / 140 文字相当`;
+    replyCount.textContent = `【PR】とリンク込みで全角 ${zenkaku(xLength(replyText(replyInput.value.trim(), linkInput.value.trim())))} / 140 文字相当`;
   };
   [mainInput, replyInput, linkInput].forEach((input) => input.addEventListener("input", updateCounts));
   updateCounts();
@@ -428,7 +436,9 @@ function viewEditor(raw, number, total) {
     el("h2", {}, `セット ${number} / ${total}：編集`),
     el("label", { htmlFor: "edit-main" }, "本文"), mainInput, mainCount,
     mainLocked ? el("p", { class: "sub" }, "本ポストは投稿済みなので、本文は変更できません。") : null,
-    el("label", { htmlFor: "edit-reply" }, "リプライの文章"), replyInput,
+    el("label", { htmlFor: "edit-reply" }, "リプライの文章"),
+    el("p", { class: "sub" }, "投稿するときは先頭に【PR】が自動で付きます。"),
+    replyInput,
     el("label", { htmlFor: "edit-link" }, "リンク"), linkInput, replyCount,
     el("label", {}, "リプライの画像"), preview, fileInput,
     el("button", { class: "second", id: "edit-pick", onclick: () => fileInput.click() }, "写真から選び直す"),
