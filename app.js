@@ -118,15 +118,13 @@ function xLength(text) {
   }
   return total + textWeight(text.slice(last));
 }
-// 広告表示のため、本文の末尾に「 #PR」を付ける (すでに PR 表記があれば付けない)。
-// PC の phone_send.py の main_text と同じ規則。
+// 広告表示のため、リプライの文章の末尾に「 #PR」を付け、次の行にリンク (すでに PR 表記があれば付けない)。
+// PC の phone_send.py の reply_text と同じ規則。
 const PR_LABEL = "#PR";
 const PR_PATTERN = /(?<![A-Za-z])(PR|ＰＲ)(?![A-Za-z])/;
-function mainText(main) {
-  return PR_PATTERN.test(main) ? main : `${main} ${PR_LABEL}`;
-}
 function replyText(reply, link) {
-  return `${reply}\n${link}`;
+  const body = PR_PATTERN.test(reply) ? reply : `${reply} ${PR_LABEL}`;
+  return `${body}\n${link}`;
 }
 function hasUrl(text) {
   return /(https?:\/\/|www\.)\S*/i.test(text);
@@ -156,9 +154,9 @@ function validateEdit(draft, raw) {
   } catch { /* 下でエラーにする */ }
   if (!link) errors.push("リンクが空です");
   else if (!validLink) errors.push("リンクの形が正しくありません");
-  if (xLength(mainText(main)) > MAX_WEIGHT) errors.push(`本文が長すぎます (#PR 込みで全角 ${zenkaku(xLength(mainText(main)))} 文字相当、上限 140)`);
+  if (xLength(main) > MAX_WEIGHT) errors.push(`本文が長すぎます (全角 ${zenkaku(xLength(main))} 文字相当、上限 140)`);
   const combined = replyText(reply, link);
-  if (xLength(combined) > MAX_WEIGHT) errors.push(`リプライが長すぎます (リンク込みで全角 ${zenkaku(xLength(combined))} 文字相当、上限 140)`);
+  if (xLength(combined) > MAX_WEIGHT) errors.push(`リプライが長すぎます (#PR とリンク込みで全角 ${zenkaku(xLength(combined))} 文字相当、上限 140)`);
   if (!IMAGE_MIMES.includes(image.mime)) {
     errors.push("使えない画像形式です (jpg / png / webp / gif)");
   } else {
@@ -306,12 +304,12 @@ function stepBar(step) {
 }
 
 function viewStep1(set, number, total) {
-  const url = "https://x.com/intent/post?text=" + encodeURIComponent(mainText(set.main));
+  const url = "https://x.com/intent/post?text=" + encodeURIComponent(set.main);
   return el("section", { class: "card" },
     stepBar(1),
     el("h2", {}, `セット ${number} / ${total}：本ポスト`),
     editedTag(set),
-    el("div", { class: "quote" }, mainText(set.main)),
+    el("div", { class: "quote" }, set.main),
     el("a", { class: "btn", href: url, target: "_blank", rel: "noopener", id: "open-main" }, "X で本ポストを開く"),
     el("p", { class: "sub" }, "X が開いたら文章を確認して「ポスト」を押し、このアプリに戻ってください。"),
     el("button", {
@@ -352,7 +350,7 @@ function viewStep3(set, number, total) {
     el("h2", {}, `セット ${number} / ${total}：リプライ`),
     el("a", { class: "btn", href: `https://x.com/${state.handle}`, target: "_blank", rel: "noopener", id: "open-profile" }, "X で自分のページを開く"),
     el("ol", {},
-      el("li", {}, "次の本ポストを開く", el("div", { class: "quote" }, mainText(set.main))),
+      el("li", {}, "次の本ポストを開く", el("div", { class: "quote" }, set.main)),
       el("li", {}, "「返信」を押し、入力欄を長押しして「貼り付け」"),
       el("li", {}, "写真のマークを押し、次の画像を選ぶ"),
     ),
@@ -401,8 +399,8 @@ function viewEditor(raw, number, total) {
   let previewUrl = null;
 
   const updateCounts = () => {
-    mainCount.textContent = `#PR 込みで全角 ${zenkaku(xLength(mainText(mainInput.value.trim())))} / 140 文字相当`;
-    replyCount.textContent = `リンク込みで全角 ${zenkaku(xLength(replyText(replyInput.value.trim(), linkInput.value.trim())))} / 140 文字相当`;
+    mainCount.textContent = `全角 ${zenkaku(xLength(mainInput.value.trim()))} / 140 文字相当`;
+    replyCount.textContent = `#PR とリンク込みで全角 ${zenkaku(xLength(replyText(replyInput.value.trim(), linkInput.value.trim())))} / 140 文字相当`;
   };
   [mainInput, replyInput, linkInput].forEach((input) => input.addEventListener("input", updateCounts));
   updateCounts();
@@ -436,11 +434,10 @@ function viewEditor(raw, number, total) {
 
   return el("section", { class: "card" },
     el("h2", {}, `セット ${number} / ${total}：編集`),
-    el("label", { htmlFor: "edit-main" }, "本文"),
-    el("p", { class: "sub" }, "投稿するときは末尾に「 #PR」が自動で付きます。"),
-    mainInput, mainCount,
+    el("label", { htmlFor: "edit-main" }, "本文"), mainInput, mainCount,
     mainLocked ? el("p", { class: "sub" }, "本ポストは投稿済みなので、本文は変更できません。") : null,
     el("label", { htmlFor: "edit-reply" }, "リプライの文章"),
+    el("p", { class: "sub" }, "投稿するときは文章の末尾に「 #PR」が自動で付き、次の行にリンクが入ります。"),
     replyInput,
     el("label", { htmlFor: "edit-link" }, "リンク"), linkInput, replyCount,
     el("label", {}, "リプライの画像"), preview, fileInput,
