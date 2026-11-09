@@ -1,4 +1,4 @@
-const CACHE = "x-helper-v1";
+const CACHE = "x-helper-v2";
 const FILES = ["./", "index.html", "app.js", "manifest.webmanifest", "icon-192.png", "icon-512.png"];
 
 self.addEventListener("install", (event) => {
