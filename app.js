@@ -1,6 +1,8 @@
 "use strict";
 
 const DATA_URL = "https://api.github.com/repos/hiro8880343/x-post-helper/contents/bundle.enc?ref=data";
+// 本ポストの URL を PC へ返す先 (非公開リポジトリ。合鍵はこのリポジトリだけに書き込める)
+const RESULTS_URL = "https://api.github.com/repos/hiro8880343/x-post-results/contents/urls/";
 
 /* ---------- 保存 (IndexedDB) ---------- */
 let dbPromise;
@@ -39,6 +41,9 @@ const state = {
   done: {},         // id -> 完了日時 (受信し直しても残る = 二重投稿防止)
   step: {},         // id -> 1 | 2 | 3
   edits: {},        // id -> スマホで直した内容 (PC の元データとの差分)
+  xToken: "",       // URL を PC へ返すための合鍵
+  urls: {},         // id -> { url, main, sent } 本ポストの URL
+  urlError: "",
   editingId: null,  // 編集画面を開いているセットの id
   etag: "",
   justConnected: false,
@@ -46,7 +51,7 @@ const state = {
 };
 
 async function loadState() {
-  for (const name of ["key", "handle", "bundle", "done", "step", "edits", "etag"]) {
+  for (const name of ["key", "handle", "bundle", "done", "step", "edits", "etag", "xToken", "urls"]) {
     const value = await kvGet(name);
     if (value !== undefined) state[name] = value;
   }
@@ -241,6 +246,7 @@ async function sync(manual) {
   } finally {
     state.syncing = false;
     renderSyncButton();
+    flushUrls();  // 送れていない URL があれば送り直す
     // 編集中は入力を消さないよう描き直さない (閉じたときに反映される)
     if (state.handle && !state.editingId && (changed || !state.bundle || state.syncError !== errorBefore)) render();
   }
@@ -251,6 +257,55 @@ function renderSyncButton() {
   button.hidden = !state.key;
   button.disabled = state.syncing;
   button.textContent = state.syncing ? "受信中…" : "受信";
+}
+
+/* ---------- 本ポストの URL を PC へ返す ---------- */
+function normalizePostUrl(text) {
+  const match = text.trim().match(/^https?:\/\/(?:www\.|mobile\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})\/status\/(\d+)/i);
+  return match ? { handle: match[1], url: `https://x.com/${match[1]}/status/${match[2]}` } : null;
+}
+function toBase64(text) {
+  let bin = "";
+  for (const byte of new TextEncoder().encode(text)) bin += String.fromCharCode(byte);
+  return btoa(bin);
+}
+async function putResult(id, entry) {
+  const url = (window.__RESULTS_URL || RESULTS_URL) + id + ".json";
+  const headers = { Authorization: `Bearer ${state.xToken}`, Accept: "application/vnd.github+json" };
+  const body = { message: "Add post URL", content: toBase64(JSON.stringify({ url: entry.url, main: entry.main })) };
+  const put = () => fetch(url, { method: "PUT", headers, body: JSON.stringify(body) });
+  let res = await put();
+  if (res.status === 409 || res.status === 422) {  // 同じセットの URL を送り直すときは、今のファイルの情報が要る
+    const current = await fetch(url, { headers, cache: "no-store" });
+    if (current.ok) body.sha = (await current.json()).sha;
+    res = await put();
+  }
+  if (!res.ok) throw new Error(res.status === 401 || res.status === 403 || res.status === 404
+    ? "合鍵が使えません。PC の進行状況の画面で合鍵を作り直してください。" : `送信に失敗しました (${res.status})`);
+}
+async function flushUrls() {
+  if (!state.xToken) return;
+  const before = state.urlError;
+  state.urlError = "";
+  for (const [id, entry] of Object.entries(state.urls)) {
+    if (entry.sent) continue;
+    try {
+      await putResult(id, entry);
+      entry.sent = true;
+      await kvSet("urls", state.urls);
+    } catch (e) {
+      state.urlError = e.message.includes("Failed to fetch") ? "インターネットにつながりません。つながったら自動で送ります。" : e.message;
+      break;
+    }
+  }
+  if (state.urlError !== before && state.handle && !state.editingId) render();
+}
+async function saveUrl(set, url) {
+  // PC は元の本文で動画を探すので、スマホで本文を直していても元の本文を送る
+  const raw = state.bundle.sets.find((s) => s.id === set.id);
+  state.urls[set.id] = { url, main: raw.main, sent: false };
+  await kvSet("urls", state.urls);
+  flushUrls();
 }
 
 /* ---------- 操作 ---------- */
@@ -312,11 +367,47 @@ function viewStep1(set, number, total) {
     el("div", { class: "quote" }, set.main),
     el("a", { class: "btn", href: url, target: "_blank", rel: "noopener", id: "open-main" }, "X で本ポストを開く"),
     el("p", { class: "sub" }, "X が開いたら文章を確認して「ポスト」を押し、このアプリに戻ってください。"),
-    el("button", {
+    state.xToken ? urlForm(set) : el("button", {
       class: "second", id: "main-posted",
       onclick: () => setStep(set, 2),
     }, "ポストした → 次へ"),
     editButton(set));
+}
+
+function urlForm(set) {
+  const input = el("input", { id: "post-url", type: "url", autocapitalize: "off", autocomplete: "off",
+    placeholder: "https://x.com/.../status/...", value: state.urls[set.id]?.url || "" });
+  const message = el("p", { class: "error", id: "post-url-error" });
+  const next = async () => {
+    const parsed = normalizePostUrl(input.value);
+    if (!parsed) {
+      message.textContent = "本ポストの URL を貼り付けてください (https://x.com/.../status/数字)";
+      return;
+    }
+    if (parsed.handle.toLowerCase() !== state.handle.toLowerCase() && parsed.handle !== "i") {
+      message.textContent = `別のアカウント (@${parsed.handle}) の投稿です。自分の本ポストの URL を貼り付けてください`;
+      return;
+    }
+    await saveUrl(set, parsed.url);
+    await setStep(set, 2);
+  };
+  return el("div", {},
+    el("p", { class: "sub" }, "投稿したら、X の共有ボタンから「リンクをコピー」して、ここに貼り付けてください。YouTube の概要欄に入ります。"),
+    input,
+    el("button", {
+      class: "second", id: "paste-url",
+      onclick: async () => {
+        try {
+          input.value = await navigator.clipboard.readText();
+          message.textContent = "";
+        } catch {
+          toast("貼り付けできませんでした。入力欄を長押しして貼り付けてください");
+        }
+      },
+    }, "貼り付け"),
+    message,
+    el("button", { id: "main-posted", onclick: next }, "ポストした → 次へ"),
+    el("button", { class: "second", id: "skip-url", onclick: () => setStep(set, 2) }, "URL なしで次へ"));
 }
 
 function viewStep2(set, number, total) {
@@ -520,6 +611,7 @@ function render() {
     ? `${finished} / ${sets.length} セット完了 ・ PC で作成 ${state.bundle.created.replace("T", " ").slice(0, 16)}`
     : "";
   if (state.syncError) view.append(el("div", { class: "notice" }, state.syncError));
+  if (state.urlError) view.append(el("div", { class: "notice", id: "url-error" }, state.urlError));
 
   if (!state.bundle) {
     view.append(el("section", { class: "card" },
@@ -558,6 +650,11 @@ async function readKeyFromLink() {
   state.etag = "";
   await kvSet("key", state.key);
   await kvSet("etag", "");
+  const token = location.hash.match(/[#&]t=([A-Za-z0-9_]+)/);
+  if (token) {
+    state.xToken = token[1];
+    await kvSet("xToken", state.xToken);
+  }
   // 鍵を履歴やアドレス欄に残さない
   history.replaceState(null, "", location.pathname);
 }
