@@ -272,7 +272,8 @@ function toBase64(text) {
 async function putResult(id, entry) {
   const url = (window.__RESULTS_URL || RESULTS_URL) + id + ".json";
   const headers = { Authorization: `Bearer ${state.xToken}`, Accept: "application/vnd.github+json" };
-  const body = { message: "Add post URL", content: toBase64(JSON.stringify({ url: entry.url, main: entry.main })) };
+  // kind: "reply" = リプライの URL (今の方式)。古いアプリが送った本ポストの URL には kind が無い
+  const body = { message: "Add post URL", content: toBase64(JSON.stringify({ url: entry.url, main: entry.main, kind: entry.kind || "main" })) };
   const put = () => fetch(url, { method: "PUT", headers, body: JSON.stringify(body) });
   let res = await put();
   if (res.status === 409 || res.status === 422) {  // 同じセットの URL を送り直すときは、今のファイルの情報が要る
@@ -303,7 +304,7 @@ async function flushUrls() {
 async function saveUrl(set, url) {
   // PC は元の本文で動画を探すので、スマホで本文を直していても元の本文を送る
   const raw = state.bundle.sets.find((s) => s.id === set.id);
-  state.urls[set.id] = { url, main: raw.main, sent: false };
+  state.urls[set.id] = { url, main: raw.main, kind: "reply", sent: false };
   await kvSet("urls", state.urls);
   flushUrls();
 }
@@ -367,32 +368,41 @@ function viewStep1(set, number, total) {
     el("div", { class: "quote" }, set.main),
     el("a", { class: "btn", href: url, target: "_blank", rel: "noopener", id: "open-main" }, "X で本ポストを開く"),
     el("p", { class: "sub" }, "X が開いたら文章を確認して「ポスト」を押し、このアプリに戻ってください。"),
-    state.xToken ? urlForm(set) : el("button", {
+    el("button", {
       class: "second", id: "main-posted",
       onclick: () => setStep(set, 2),
     }, "ポストした → 次へ"),
     editButton(set));
 }
 
+// リプライ (アフィリエイトリンク入り) の URL を PC へ返す。YouTube の概要欄にはこの URL が入る。
 function urlForm(set) {
+  const saved = state.urls[set.id];
   const input = el("input", { id: "post-url", type: "url", autocapitalize: "off", autocomplete: "off",
-    placeholder: "https://x.com/.../status/...", value: state.urls[set.id]?.url || "" });
+    placeholder: "https://x.com/.../status/...", value: saved?.kind === "reply" ? saved.url : "" });
   const message = el("p", { class: "error", id: "post-url-error" });
   const next = async () => {
     const parsed = normalizePostUrl(input.value);
     if (!parsed) {
-      message.textContent = "本ポストの URL を貼り付けてください (https://x.com/.../status/数字)";
+      message.textContent = "リプライの URL を貼り付けてください (https://x.com/.../status/数字)";
       return;
     }
     if (parsed.handle.toLowerCase() !== state.handle.toLowerCase() && parsed.handle !== "i") {
-      message.textContent = `別のアカウント (@${parsed.handle}) の投稿です。自分の本ポストの URL を貼り付けてください`;
+      message.textContent = `別のアカウント (@${parsed.handle}) の投稿です。自分のリプライの URL を貼り付けてください`;
+      return;
+    }
+    // 同じ投稿かどうかは投稿番号で比べる (ID の大文字小文字や ?s=20 などの違いは無視)
+    const statusId = (url) => url.match(/\/status\/(\d+)/)?.[1];
+    const usedBy = Object.entries(state.urls).find(([id, e]) => id !== set.id && statusId(e.url) === statusId(parsed.url));
+    if (usedBy) {
+      message.textContent = "この URL はほかのセットで使ったものです。今回のリプライの URL をコピーし直してください";
       return;
     }
     await saveUrl(set, parsed.url);
-    await setStep(set, 2);
+    await markDone(set);
   };
   return el("div", {},
-    el("p", { class: "sub" }, "投稿したら、X の共有ボタンから「リンクをコピー」して、ここに貼り付けてください。YouTube の概要欄に入ります。"),
+    el("p", { class: "sub" }, "返信したら、そのリプライの共有ボタンから「リンクをコピー」して、ここに貼り付けてください。本ポストではなくリプライのリンクです。YouTube の概要欄に入ります。"),
     input,
     el("button", {
       class: "second", id: "paste-url",
@@ -406,8 +416,8 @@ function urlForm(set) {
       },
     }, "貼り付け"),
     message,
-    el("button", { id: "main-posted", onclick: next }, "ポストした → 次へ"),
-    el("button", { class: "second", id: "skip-url", onclick: () => setStep(set, 2) }, "URL なしで次へ"));
+    el("button", { id: "finish", onclick: next }, "返信した → 完了"),
+    el("button", { class: "second", id: "skip-url", onclick: () => markDone(set) }, "URL なしで完了"));
 }
 
 function viewStep2(set, number, total) {
@@ -451,7 +461,7 @@ function viewStep3(set, number, total) {
       toast(await copyReply(set) ? "文章とリンクをコピーしました" : "コピーできませんでした");
     } }, "文章をもう一度コピー"),
     el("button", { class: "second", onclick: () => { saveImage(set, number); toast("画像をもう一度保存しました"); } }, "画像をもう一度保存"),
-    el("button", { id: "finish", onclick: () => markDone(set) }, "返信した → 完了"),
+    state.xToken ? urlForm(set) : el("button", { id: "finish", onclick: () => markDone(set) }, "返信した → 完了"),
     el("button", { class: "second", onclick: () => setStep(set, 2) }, "← 準備に戻る"));
 }
 
