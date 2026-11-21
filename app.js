@@ -3,6 +3,9 @@
 const DATA_URL = "https://api.github.com/repos/hiro8880343/x-post-helper/contents/bundle.enc?ref=data";
 // 本ポストの URL を PC へ返す先 (非公開リポジトリ。合鍵はこのリポジトリだけに書き込める)
 const RESULTS_URL = "https://api.github.com/repos/hiro8880343/x-post-results/contents/urls/";
+// コミュニティ投稿のカード（PC の community.py phone が community ブランチに置く。X 投稿とは別のファイル）
+const COMM_URL = "https://api.github.com/repos/hiro8880343/x-post-helper/contents/community.enc?ref=community";
+const COMM_DONE_URL = "https://api.github.com/repos/hiro8880343/x-post-results/contents/community/";
 
 /* ---------- 保存 (IndexedDB) ---------- */
 let dbPromise;
@@ -43,6 +46,10 @@ const state = {
   edits: {},        // id -> スマホで直した内容 (PC の元データとの差分)
   xToken: "",       // URL を PC へ返すための合鍵
   urls: {},         // id -> { url, main, sent } 本ポストの URL
+  tab: "x",         // "x" = X 投稿、"comm" = コミュニティ投稿
+  comm: null,       // { created, cards: [{ id, at, kind, body, title, images: [{name, mime, data}] }] }
+  commEtag: "",
+  commDone: {},     // カード id -> { at, sent } 「投稿した」を押した日時（PC へ送れたら sent）
   urlError: "",
   editingId: null,  // 編集画面を開いているセットの id
   etag: "",
@@ -51,7 +58,7 @@ const state = {
 };
 
 async function loadState() {
-  for (const name of ["key", "handle", "bundle", "done", "step", "edits", "etag", "xToken", "urls"]) {
+  for (const name of ["key", "handle", "bundle", "done", "step", "edits", "etag", "xToken", "urls", "tab", "comm", "commEtag", "commDone"]) {
     const value = await kvGet(name);
     if (value !== undefined) state[name] = value;
   }
@@ -244,13 +251,171 @@ async function sync(manual) {
     state.syncError = e.message.includes("Failed to fetch")
       ? "インターネットにつながりません。保存済みのデータを表示しています。" : e.message;
   } finally {
+    await syncCommunity(manual);
     state.syncing = false;
     renderSyncButton();
-    flushUrls();  // 送れていない URL があれば送り直す
+    flushUrls();
+    flushCommDone();  // 送れていない URL があれば送り直す
     // 編集中は入力を消さないよう描き直さない (閉じたときに反映される)
-    if (state.handle && !state.editingId && (changed || !state.bundle || state.syncError !== errorBefore)) render();
+    if (state.handle && !state.editingId && (changed || state.commChanged || !state.bundle || state.syncError !== errorBefore)) render();
+    state.commChanged = false;
   }
 }
+
+/* ---------- コミュニティ投稿のカード ---------- */
+async function syncCommunity(manual) {
+  try {
+    const headers = { Accept: "application/vnd.github.raw+json" };
+    if (state.commEtag && state.comm) headers["If-None-Match"] = state.commEtag;
+    const res = await fetch(window.__COMM_URL || COMM_URL, { headers, cache: "no-store" });
+    if (res.status === 304 || res.status === 404) return;
+    if (!res.ok) throw new Error(`コミュニティのカードを受信できませんでした (${res.status})`);
+    const comm = await decrypt(await res.arrayBuffer());
+    const isNew = !state.comm || comm.created !== state.comm.created;
+    state.comm = comm;
+    state.commEtag = res.headers.get("ETag") || "";
+    commCache.forEach((u) => URL.revokeObjectURL(u));
+    commCache.clear();
+    await kvSet("comm", comm);
+    await kvSet("commEtag", state.commEtag);
+    if (isNew) {
+      state.commChanged = true;
+      if (manual || state.tab === "comm") toast(`コミュニティのカード ${comm.cards.length} 枚を受け取りました`);
+    }
+  } catch (e) {
+    if (!e.message.includes("Failed to fetch")) state.syncError = e.message;
+  }
+}
+const commCache = new Map();
+function commImageUrl(card, i) {
+  const k = `${card.id}/${i}`;
+  if (!commCache.has(k)) {
+    const img = card.images[i];
+    commCache.set(k, URL.createObjectURL(new Blob([b64ToBytes(img.data)], { type: img.mime })));
+  }
+  return commCache.get(k);
+}
+async function saveCommImages(card) {
+  const files = card.images.map((img) => new File([b64ToBytes(img.data)], img.name, { type: img.mime }));
+  // 共有で端末に渡す（Android は「画像を保存」や YouTube アプリへ直接渡せる）。できない端末は1枚ずつ保存
+  if (navigator.canShare && navigator.canShare({ files })) {
+    try {
+      await navigator.share({ files });
+      return;
+    } catch (e) {
+      if (e.name === "AbortError") return;
+    }
+  }
+  card.images.forEach((img, i) => {
+    const a = el("a", { href: commImageUrl(card, i), download: img.name });
+    document.body.append(a);
+    a.click();
+    a.remove();
+  });
+  toast(`画像 ${card.images.length} 枚を保存しました（番号の順に選んでください）`);
+}
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const area = el("textarea", { value: text });
+    document.body.append(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    area.remove();
+    return ok;
+  }
+}
+async function putCommDone(id, at) {
+  const url = (window.__COMM_DONE_URL || COMM_DONE_URL) + id + ".json";
+  const headers = { Authorization: `Bearer ${state.xToken}`, Accept: "application/vnd.github+json" };
+  const body = { message: "Community post done", content: toBase64(JSON.stringify({ id, done: at })) };
+  let res = await fetch(url, { method: "PUT", headers, body: JSON.stringify(body) });
+  if (res.status === 409 || res.status === 422) {
+    const current = await fetch(url, { headers, cache: "no-store" });
+    if (current.ok) body.sha = (await current.json()).sha;
+    res = await fetch(url, { method: "PUT", headers, body: JSON.stringify(body) });
+  }
+  if (!res.ok) throw new Error(`「投稿した」を PC へ送れませんでした (${res.status})`);
+}
+async function flushCommDone() {
+  if (!state.xToken) return;
+  for (const [id, entry] of Object.entries(state.commDone)) {
+    if (entry.sent) continue;
+    try {
+      await putCommDone(id, entry.at);
+      entry.sent = true;
+      await kvSet("commDone", state.commDone);
+    } catch {
+      break;   // つながったときに送り直す
+    }
+  }
+}
+async function markCommDone(card) {
+  state.commDone[card.id] = { at: new Date().toISOString(), sent: false };
+  await kvSet("commDone", state.commDone);
+  toast("投稿済みにしました");
+  render();
+  scrollTo(0, 0);
+  flushCommDone();
+}
+async function undoCommDone(card) {
+  if (!confirm("このカードを「まだ」に戻しますか？")) return;
+  delete state.commDone[card.id];
+  await kvSet("commDone", state.commDone);
+  render();
+}
+function commWhen(at) {
+  const d = new Date(at);
+  const days = ["日", "月", "火", "水", "木", "金", "土"];
+  return `${d.getMonth() + 1}/${d.getDate()}（${days[d.getDay()]}）${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+function viewCommCard(card, open) {
+  const done = state.commDone[card.id];
+  const kind = card.kind === "illust" ? "リンクなし" : "リンク付き";
+  const box = el("section", { class: "card" },
+    el("h2", {}, `${commWhen(card.at)} ・ ${kind}`),
+    done ? el("p", { class: "tag ok" }, `✓ 投稿済み（${commWhen(done.at)} に押しました）`) : null);
+  if (!open) {
+    box.append(el("p", { class: "sub" }, `画像 ${card.images.length} 枚 ・ ${card.body.split("\n")[0]}`));
+    if (done) box.append(el("button", { class: "second small", onclick: () => undoCommDone(card) }, "まだに戻す"));
+    return box;
+  }
+  const grid = el("div", { class: "grid" });
+  card.images.forEach((_, i) => grid.append(el("div", { class: "cell" },
+    el("img", { class: "thumb", src: commImageUrl(card, i), alt: `${i + 1}枚目` }), el("span", { class: "num" }, String(i + 1)))));
+  box.append(
+    el("p", { class: "sub" }, `① 画像 ${card.images.length} 枚を保存 → ② 本文をコピー → ③ YouTube アプリで投稿（画像は 1 から順に選ぶ）`),
+    grid,
+    el("button", { onclick: () => saveCommImages(card) }, `① 画像 ${card.images.length} 枚を保存`),
+    el("div", { class: "quote" }, card.body),
+    el("button", { onclick: async () => toast((await copyText(card.body)) ? "本文をコピーしました" : "コピーできませんでした") }, "② 本文をコピー"),
+    el("a", { class: "btn second", href: "https://www.youtube.com/", target: "_blank", rel: "noopener" }, "③ YouTube を開く"),
+    el("button", { class: "second", onclick: () => markCommDone(card) }, "投稿した（予約した）"));
+  return box;
+}
+function viewCommunity() {
+  const cards = state.comm?.cards ?? [];
+  const wrap = el("div", {});
+  if (!cards.length) {
+    wrap.append(el("section", { class: "card" }, el("h2", {}, "コミュニティのカードはまだありません"),
+      el("p", { class: "sub" }, "PC で下書きを作ると、夜の作業でここへ届きます。")));
+    return wrap;
+  }
+  const left = cards.filter((c) => !state.commDone[c.id]);
+  wrap.append(el("p", { class: "sub" }, `残り ${left.length} / ${cards.length} 枚 ・ PC で作成 ${state.comm.created.replace("T", " ").slice(0, 16)}`));
+  // 次にやる1枚を開いて出し、ほかは閉じて並べる
+  cards.forEach((c) => wrap.append(viewCommCard(c, Boolean(left[0]) && c.id === left[0].id)));
+  return wrap;
+}
+function tabBar() {
+  const left = (state.comm?.cards ?? []).filter((c) => !state.commDone[c.id]).length;
+  const tab = (name, label) => el("button", { class: "small" + (state.tab === name ? "" : " second"),
+    onclick: async () => { state.tab = name; await kvSet("tab", name); render(); scrollTo(0, 0); } }, label);
+  return el("div", { class: "tabs" }, tab("x", "X 投稿"), tab("comm", `コミュニティ${left ? `（${left}）` : ""}`));
+}
+
 
 function renderSyncButton() {
   const button = document.getElementById("sync");
@@ -612,6 +777,14 @@ function render() {
   if (!state.handle) {
     if (state.justConnected) view.append(el("div", { class: "notice" }, "接続しました。"));
     view.append(viewHandle());
+    return;
+  }
+
+  view.append(tabBar());
+  if (state.tab === "comm") {
+    status.textContent = "";
+    if (state.syncError) view.append(el("div", { class: "notice" }, state.syncError));
+    view.append(viewCommunity());
     return;
   }
 
